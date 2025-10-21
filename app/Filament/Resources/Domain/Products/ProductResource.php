@@ -4,11 +4,14 @@ namespace App\Filament\Resources\Domain\Products;
 
 use App\Domain\Products\Product;
 use App\Filament\Resources\Domain\Products\ProductResource\Pages;
+use App\Services\Odoo\OdooSyncService;
 use Filament\Forms;
 use Filament\Forms\Form;
+use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
@@ -69,12 +72,31 @@ class ProductResource extends Resource
                             })
                             ->columnSpanFull(),
                     ]),
+                Forms\Components\Section::make('Sync Status')
+                    ->columns(2)
+                    ->schema([
+                        Forms\Components\Placeholder::make('origin_system')
+                            ->label('Source')
+                            ->content(fn (?Product $record) => $record?->origin_system ? ucfirst($record->origin_system) : 'N/A'),
+                        Forms\Components\Placeholder::make('last_sync_status')
+                            ->label('Status')
+                            ->content(fn (?Product $record) => $record?->last_sync_status ? ucfirst($record->last_sync_status) : 'Never synced'),
+                        Forms\Components\Placeholder::make('last_synced_at')
+                            ->label('Last Synced At')
+                            ->content(fn (?Product $record) => $record?->last_synced_at?->format('Y-m-d H:i') ?? 'N/A'),
+                        Forms\Components\Placeholder::make('last_sync_message')
+                            ->label('Last Message')
+                            ->content(fn (?Product $record) => $record?->last_sync_message ?? 'N/A')
+                            ->columnSpanFull(),
+                    ])
+                    ->visible(fn (?Product $record) => $record !== null),
             ]);
     }
 
     public static function table(Table $table): Table
     {
         return $table
+            ->poll('10s')
             ->columns([
                 Tables\Columns\TextColumn::make('sku')
                     ->label('SKU')
@@ -98,6 +120,36 @@ class ProductResource extends Resource
                     ->sortable()
                     ->formatStateUsing(fn (Product $record) => number_format($record->sale_price, 2))
                     ->suffix(fn (Product $record) => ' '.$record->currency),
+                Tables\Columns\BadgeColumn::make('origin_system')
+                    ->label('Source')
+                    ->color(fn (?string $state) => match ($state) {
+                        'odoo' => 'success',
+                        'local' => 'warning',
+                        default => 'secondary',
+                    })
+                    ->formatStateUsing(fn (?string $state) => $state ? ucfirst($state) : 'Unknown')
+                    ->sortable(),
+                Tables\Columns\BadgeColumn::make('last_sync_status')
+                    ->label('Sync Status')
+                    ->color(fn (?string $state) => match ($state) {
+                        'success' => 'success',
+                        'failed' => 'danger',
+                        'processing' => 'info',
+                        'pending' => 'warning',
+                        default => 'secondary',
+                    })
+                    ->formatStateUsing(fn (?string $state) => $state ? ucfirst($state) : 'Never')
+                    ->sortable(),
+                Tables\Columns\TextColumn::make('last_synced_at')
+                    ->label('Last Synced')
+                    ->dateTime('Y-m-d H:i')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('last_sync_message')
+                    ->label('Last Message')
+                    ->wrap()
+                    ->limit(50)
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('updated_at')
                     ->dateTime('Y-m-d H:i')
                     ->sortable(),
@@ -139,6 +191,36 @@ class ProductResource extends Resource
                             ->when($min !== null && $min !== '', fn (Builder $q) => $q->where('cost_price', '>=', (float) $min))
                             ->when($max !== null && $max !== '', fn (Builder $q) => $q->where('cost_price', '<=', (float) $max));
                     }),
+                SelectFilter::make('origin_system')
+                    ->label('Source')
+                    ->options([
+                        'local' => 'Local',
+                        'odoo' => 'Odoo',
+                    ]),
+                SelectFilter::make('last_sync_status')
+                    ->label('Sync Status')
+                    ->options([
+                        'pending' => 'Pending',
+                        'processing' => 'Processing',
+                        'success' => 'Success',
+                        'failed' => 'Failed',
+                        'never' => 'Never',
+                    ]),
+                Filter::make('needs_attention')
+                    ->label('Needs attention')
+                    ->form([
+                        Forms\Components\Toggle::make('only')
+                            ->label('Show products needing attention'),
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        $only = (bool) ($data['only'] ?? false);
+
+                        return $query->when(
+                            $only,
+                            fn (Builder $q) => $q->whereIn('last_sync_status', ['failed', 'pending'])
+                        );
+                    })
+                    ->indicateUsing(fn (array $data): ?string => ! empty($data['only']) ? 'Needs attention' : null),
                 Filter::make('updated_at')
                     ->form([
                         Forms\Components\DatePicker::make('from'),
@@ -155,6 +237,36 @@ class ProductResource extends Resource
             ])
             ->bulkActions([
                 Tables\Actions\BulkActionGroup::make([
+                    Tables\Actions\BulkAction::make('push_to_odoo')
+                        ->label('Push to Odoo')
+                        ->icon('heroicon-m-cloud-arrow-up')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records) {
+                            if ($records->isEmpty()) {
+                                return;
+                            }
+
+                            /** @var OdooSyncService $service */
+                            $service = app(OdooSyncService::class);
+                            $summary = $service->pushProducts($records);
+
+                            $body = sprintf(
+                                'Processed %d products — %d success, %d failed.',
+                                $summary['total'],
+                                $summary['success'],
+                                $summary['failed']
+                            );
+
+                            $notification = Notification::make()
+                                ->title('Odoo sync complete')
+                                ->body($body);
+
+                            $summary['failed'] > 0
+                                ? $notification->warning()
+                                : $notification->success();
+
+                            $notification->send();
+                        }),
                     Tables\Actions\BulkAction::make('increase_cost')
                         ->label('Increase cost %')
                         ->icon('heroicon-m-arrow-up-right')

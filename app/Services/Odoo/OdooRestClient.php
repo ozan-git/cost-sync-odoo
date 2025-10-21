@@ -2,6 +2,8 @@
 
 namespace App\Services\Odoo;
 
+use DateTimeInterface;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -83,6 +85,162 @@ class OdooRestClient implements OdooClientInterface
             ],
             message: 'Odoo product cost updated.',
         );
+    }
+
+    public function fetchProducts(array $filters = [], array $options = []): array
+    {
+        $domain = $this->buildProductSearchDomain($filters);
+
+        $fields = $options['fields'] ?? [
+            'id',
+            'product_tmpl_id',
+            'default_code',
+            'name',
+            'standard_price',
+            'list_price',
+            'qty_available',
+            'currency_id',
+            'write_date',
+        ];
+
+        $kwargs = ['fields' => $fields];
+
+        if (isset($options['limit'])) {
+            $kwargs['limit'] = (int) $options['limit'];
+        }
+
+        if (isset($options['offset'])) {
+            $kwargs['offset'] = (int) $options['offset'];
+        }
+
+        $kwargs['order'] = $options['order'] ?? 'write_date desc';
+
+        $records = $this->executeKw('product.product', 'search_read', [
+            $domain,
+        ], $kwargs);
+
+        if (! is_array($records)) {
+            return [];
+        }
+
+        return array_map(fn (array $record) => $this->mapProductRecord($record), $records);
+    }
+
+    private function buildProductSearchDomain(array $filters): array
+    {
+        $domain = [];
+
+        $skus = $this->normalizeSkuFilter($filters['skus'] ?? null);
+
+        if (! empty($skus)) {
+            $domain[] = ['default_code', 'in', $skus];
+        }
+
+        if (array_key_exists('updated_after', $filters)) {
+            $timestamp = $this->normalizeTimestamp($filters['updated_after']);
+
+            if ($timestamp) {
+                $domain[] = ['write_date', '>=', $timestamp];
+            }
+        }
+
+        if (array_key_exists('updated_before', $filters)) {
+            $timestamp = $this->normalizeTimestamp($filters['updated_before']);
+
+            if ($timestamp) {
+                $domain[] = ['write_date', '<=', $timestamp];
+            }
+        }
+
+        return $domain;
+    }
+
+    private function mapProductRecord(array $record): array
+    {
+        $template = $record['product_tmpl_id'] ?? null;
+        $templateId = is_array($template) ? (int) ($template[0] ?? 0) : (int) $template;
+
+        $currencyField = $record['currency_id'] ?? null;
+        $currency = $this->extractCurrencyCode(is_array($currencyField) ? (string) ($currencyField[1] ?? '') : (string) $currencyField);
+        $currency = $currency ? strtoupper($currency) : $this->defaultCurrency();
+
+        return [
+            'product_id' => (int) ($record['id'] ?? 0),
+            'product_template_id' => $templateId,
+            'sku' => (string) ($record['default_code'] ?? ''),
+            'name' => (string) ($record['name'] ?? ''),
+            'cost_price' => (float) ($record['standard_price'] ?? 0),
+            'sale_price' => (float) ($record['list_price'] ?? 0),
+            'qty_available' => array_key_exists('qty_available', $record) ? (float) ($record['qty_available'] ?? 0) : null,
+            'currency' => $currency,
+            'write_date' => $record['write_date'] ?? null,
+            'raw' => $record,
+        ];
+    }
+
+    private function normalizeSkuFilter(mixed $skus): array
+    {
+        if (is_string($skus)) {
+            $skus = preg_split('/[\s,]+/', $skus, -1, PREG_SPLIT_NO_EMPTY);
+        }
+
+        if (! is_array($skus)) {
+            return [];
+        }
+
+        return array_values(array_filter(array_map(
+            static fn ($sku) => trim((string) $sku),
+            $skus
+        ), static fn ($sku) => $sku !== ''));
+    }
+
+    private function normalizeTimestamp(mixed $value): ?string
+    {
+        if ($value instanceof DateTimeInterface) {
+            return $value->format('Y-m-d H:i:s');
+        }
+
+        if (is_numeric($value)) {
+            return Carbon::createFromTimestamp((int) $value)->format('Y-m-d H:i:s');
+        }
+
+        if (is_string($value) && $value !== '') {
+            try {
+                return Carbon::parse($value)->format('Y-m-d H:i:s');
+            } catch (\Throwable) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private function extractCurrencyCode(?string $value): ?string
+    {
+        if (! $value) {
+            return null;
+        }
+
+        $value = strtoupper(trim($value));
+
+        if (preg_match('/([A-Z]{3})/', $value, $matches)) {
+            return $matches[1];
+        }
+
+        return strlen($value) === 3 ? $value : null;
+    }
+
+    private function defaultCurrency(): string
+    {
+        $fromConfig = $this->config['currency'] ?? null;
+
+        if (is_string($fromConfig) && $fromConfig !== '') {
+            return strtoupper($fromConfig);
+        }
+
+        $fallback = config('services.odoo.currency', 'USD');
+
+        return strtoupper(is_string($fallback) ? $fallback : 'USD');
     }
 
     private function findProductBySku(string $sku): ?array

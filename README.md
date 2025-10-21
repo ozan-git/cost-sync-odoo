@@ -53,8 +53,10 @@ Leave `ODOO_SIMULATE=true` to work with the bundled fake client. Switch it to `f
 - **Products CRUD** with automatic sale price calculation (`cost * (1 + markup%)`).
 - **Filament filters** for SKU contains, cost range, and last update window.
 - **Bulk cost adjustments** (increase/decrease by percentage) that fire a sync per product.
+- **Bulk Odoo sync** to push selected products or import catalog slices from Odoo with per-product results.
 - **Odoo sync pipeline** via `SyncProductCostToOdoo` job, `OdooSyncService`, and a pluggable client (`OdooFakeClient` or `OdooRestClient`) that updates both `standard_price` (cost) and `list_price` (sale) when connected to a live Odoo instance.
 - **Sync logs** for every attempt (success or failure) with payload, response, status badge, and JSON drill-down.
+- **Live sync telemetry** in the product grid showing source system, latest sync status/message, and timestamps.
 - **CSV export** endpoint that respects the same filters (`/products/export`).
 - **Sample data** seeded through `ProductSeeder` with different costs and markups.
 
@@ -64,10 +66,10 @@ Leave `ODOO_SIMULATE=true` to work with the bundled fake client. Switch it to `f
 | ----- | -------------- |
 | `App\Domain\Products\Product` | Domain model; recalculates sale price & dispatches sync job when cost/markup/currency changes. |
 | `SyncProductCostToOdoo` job | Loads the product and invokes `OdooSyncService` synchronously (`dispatchSync()` by default). |
-| `OdooSyncService` | Normalises payloads, calls the configured client, and writes to `SyncLog`. |
+| `OdooSyncService` | Normalises payloads, calls the configured client, manages sync status metadata, and handles both push & pull flows. |
 | `OdooFakeClient` | Simulates network latency and 10% random failures for realistic demos. |
-| `ProductResource` | Filament resource for CRUD, filters, and bulk actions. |
-| `SyncLogResource` | Read-only Filament resource with badges, JSON previews, and auto-refresh. |
+| `ProductResource` | Filament resource for CRUD, filters, bulk actions, sync telemetry, and Odoo import/export helpers. |
+| `SyncLogResource` | Read-only Filament resource with direction & operation badges, JSON previews, and auto-refresh. |
 | `ProductsController@export` | Streams filtered CSV output using native `fputcsv`. |
 
 Switch between fake and real clients through the service container binding in `AppServiceProvider`:
@@ -80,11 +82,13 @@ $this->app->bind(OdooClientInterface::class, fn () => config('services.odoo.simu
 
 ## 6. Usage Notes
 
-1. **Editing a product** recalculates the sale price instantly and queues an Odoo sync attempt (synchronously in this iteration).
-2. **Bulk actions** on the product list ask for a percentage, update costs, and trigger a sync per record.
-3. **Sync logs** refresh every 10 seconds; click into a row to inspect payload/response JSON.
-4. **CSV export** is available at `/products/export`. Pass `sku`, `cost_min`, `cost_max`, `from`, and `to` as query params to reuse the table filters.
-5. **Queues** currently run synchronously via `dispatchSync()`. Flip to real queuing by swapping `dispatchSync` with `dispatch` and running `php artisan queue:work`.
+1. **Editing a product** recalculates the sale price instantly, marks the record as pending, and queues a push to Odoo (synchronously in this iteration).
+2. **Bulk actions** now include “Push to Odoo”, alongside percentage-based cost adjustments, so operators can resend multiple products in one go.
+3. **Import from Odoo** is available from the product list header; filter by SKUs or `updated_after`, apply a limit, and review the summary notification (with warnings for partial failures).
+4. **Product telemetry** shows the source system, last sync status/time, and latest message; use the new filters to highlight items needing attention.
+5. **Sync logs** refresh every 10 seconds and expose direction/operation badges; drill into any row to inspect payload/response JSON.
+6. **CSV export** remains at `/products/export`. Pass `sku`, `cost_min`, `cost_max`, `from`, and `to` as query params to reuse the table filters.
+7. **Queues** currently run synchronously via `dispatchSync()`. Flip to real queuing by swapping `dispatchSync` with `dispatch` and running `php artisan queue:work`.
 
 ## 7. Demo Video Script (2–5 min)
 

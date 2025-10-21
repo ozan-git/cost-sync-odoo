@@ -29,6 +29,12 @@ class SyncLogResource extends Resource
                     ->schema([
                         Forms\Components\TextInput::make('sku')->disabled(),
                         Forms\Components\TextInput::make('status')->disabled(),
+                        Forms\Components\TextInput::make('direction')->disabled(),
+                        Forms\Components\TextInput::make('operation')->disabled(),
+                        Forms\Components\TextInput::make('product_id')
+                            ->label('Product ID')
+                            ->disabled()
+                            ->columnSpanFull(),
                         Forms\Components\TextInput::make('message')
                             ->disabled()
                             ->columnSpanFull(),
@@ -68,6 +74,26 @@ class SyncLogResource extends Resource
                     ->badge()
                     ->formatStateUsing(fn (string $state) => ucfirst($state))
                     ->color(fn (string $state) => $state === 'success' ? 'success' : 'danger'),
+                Tables\Columns\TextColumn::make('direction')
+                    ->label('Direction')
+                    ->badge()
+                    ->formatStateUsing(fn (?string $state) => $state ? ucfirst($state) : 'Unknown')
+                    ->color(fn (?string $state) => match ($state) {
+                        'push' => 'primary',
+                        'pull' => 'success',
+                        default => 'secondary',
+                    })
+                    ->sortable(),
+                Tables\Columns\TextColumn::make('operation')
+                    ->label('Operation')
+                    ->badge()
+                    ->formatStateUsing(fn (?string $state) => $state ? ucwords(str_replace('_', ' ', $state)) : 'Unknown')
+                    ->sortable()
+                    ->toggleable(),
+                Tables\Columns\TextColumn::make('product_id')
+                    ->label('Product ID')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('message')
                     ->wrap()
                     ->limit(60)
@@ -111,6 +137,19 @@ class SyncLogResource extends Resource
                     ->options([
                         'success' => 'Success',
                         'failed' => 'Failed',
+                    ]),
+                SelectFilter::make('direction')
+                    ->options([
+                        'push' => 'Push',
+                        'pull' => 'Pull',
+                    ]),
+                SelectFilter::make('operation')
+                    ->label('Operation')
+                    ->options([
+                        'cost_update' => 'Cost update',
+                        'import_create' => 'Import create',
+                        'import_update' => 'Import update',
+                        'import_touch' => 'Import no-op',
                     ]),
             ])
             ->actions([
