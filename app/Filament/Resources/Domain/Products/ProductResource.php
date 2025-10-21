@@ -112,14 +112,18 @@ class ProductResource extends Resource
                             ->maxLength(100),
                     ])
                     ->query(function (Builder $query, array $data): Builder {
+                        $value = trim((string) ($data['value'] ?? ''));
+
                         return $query->when(
-                            filled($data['value'] ?? null),
-                            fn (Builder $q, string $value) => $q->where('sku', 'like', '%'.$value.'%')
+                            $value !== '',
+                            fn (Builder $q) => $q->where('sku', 'like', '%'.$value.'%')
                         );
                     })
                     ->indicateUsing(function (array $data): ?string {
-                        return filled($data['value'] ?? null)
-                            ? 'SKU contains: '.$data['value']
+                        $value = trim((string) ($data['value'] ?? ''));
+
+                        return $value !== ''
+                            ? 'SKU contains: '.$value
                             : null;
                     }),
                 Filter::make('cost_range')
@@ -128,9 +132,12 @@ class ProductResource extends Resource
                         Forms\Components\TextInput::make('max')->numeric()->label('Max cost'),
                     ])
                     ->query(function (Builder $query, array $data): Builder {
+                        $min = $data['min'] ?? null;
+                        $max = $data['max'] ?? null;
+
                         return $query
-                            ->when($data['min'] ?? null, fn (Builder $q, $value) => $q->where('cost_price', '>=', $value))
-                            ->when($data['max'] ?? null, fn (Builder $q, $value) => $q->where('cost_price', '<=', $value));
+                            ->when($min !== null && $min !== '', fn (Builder $q) => $q->where('cost_price', '>=', (float) $min))
+                            ->when($max !== null && $max !== '', fn (Builder $q) => $q->where('cost_price', '<=', (float) $max));
                     }),
                 Filter::make('updated_at')
                     ->form([
