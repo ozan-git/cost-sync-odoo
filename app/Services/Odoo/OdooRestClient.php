@@ -3,6 +3,7 @@
 namespace App\Services\Odoo;
 
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -86,18 +87,27 @@ class OdooRestClient implements OdooClientInterface
 
     private function findProductBySku(string $sku): ?array
     {
-        $result = $this->executeKw('product.product', 'search_read', [
-            [[['default_code', '=', $sku]]],
+        $ids = $this->executeKw('product.product', 'search', [
+            [['default_code', '=', $sku]],
         ], [
-            'fields' => ['id', 'product_tmpl_id', 'name'],
             'limit' => 1,
         ]);
 
-        if (empty($result)) {
+        if (empty($ids)) {
             return null;
         }
 
-        $record = $result[0];
+        $records = $this->executeKw('product.product', 'read', [
+            $ids,
+        ], [
+            'fields' => ['id', 'product_tmpl_id', 'name'],
+        ]);
+
+        if (empty($records)) {
+            return null;
+        }
+
+        $record = $records[0];
         $template = $record['product_tmpl_id'] ?? null;
         $templateId = is_array($template) ? (int) ($template[0] ?? 0) : (int) $template;
 
@@ -136,22 +146,18 @@ class OdooRestClient implements OdooClientInterface
             return $this->userId;
         }
 
-        $this->userId = (int) $this->jsonRpc('common', 'login', [
-            $this->getDatabase(),
-            $this->getUsername(),
-            $this->getSecret(),
-        ]);
+        $userId = $this->attemptAuthentication();
 
-        if (! $this->userId) {
+        if (! $userId) {
             throw new RuntimeException('Unable to authenticate with Odoo. Please verify credentials/API key.');
         }
 
-        return $this->userId;
+        return $this->userId = $userId;
     }
 
     private function jsonRpc(string $service, string $method, array $args = []): mixed
     {
-        $endpoint = rtrim($this->config['base_url'] ?? '', '/').'/jsonrpc';
+        $endpoint = $this->buildJsonRpcEndpoint();
 
         $payload = [
             'jsonrpc' => '2.0',
@@ -171,6 +177,14 @@ class OdooRestClient implements OdooClientInterface
         if ($response->failed()) {
             $body = $response->body();
 
+            Log::error('Odoo RPC HTTP failure.', [
+                'service' => $service,
+                'method' => $method,
+                'args' => $this->sanitizeRpcArgs($service, $method, $args),
+                'status' => $response->status(),
+                'body' => mb_strimwidth($body ?? '', 0, 500, '…'),
+            ]);
+
             throw new RuntimeException(sprintf(
                 'Odoo request failed with status %s (%s): %s',
                 $response->status(),
@@ -185,10 +199,95 @@ class OdooRestClient implements OdooClientInterface
             $message = $json['error']['message'] ?? 'Unknown Odoo error';
             $data = $json['error']['data']['message'] ?? null;
 
+            Log::error('Odoo RPC returned application error.', [
+                'service' => $service,
+                'method' => $method,
+                'args' => $this->sanitizeRpcArgs($service, $method, $args),
+                'error' => $json['error'],
+            ]);
+
             throw new RuntimeException(trim($message.($data ? ' - '.$data : '')));
         }
 
         return $json['result'] ?? null;
+    }
+
+    private function buildJsonRpcEndpoint(): string
+    {
+        $baseUrl = $this->config['base_url'] ?? null;
+
+        if (empty($baseUrl)) {
+            throw new RuntimeException('Odoo base URL (services.odoo.base_url) is not configured.');
+        }
+
+        $path = $this->config['jsonrpc_path'] ?? '/jsonrpc';
+        $path = $path === '' ? '/jsonrpc' : $path;
+        $path = '/'.ltrim($path, '/');
+
+        return rtrim($baseUrl, '/').$path;
+    }
+
+    private function attemptAuthentication(): ?int
+    {
+        $database = $this->getDatabase();
+        $username = $this->getUsername();
+        $secret = $this->getSecret();
+
+        try {
+            $login = $this->jsonRpc('common', 'login', [
+                $database,
+                $username,
+                $secret,
+            ]);
+
+            if (! empty($login)) {
+                Log::debug('Odoo login RPC succeeded.', ['user_id' => $login]);
+                return (int) $login;
+            }
+
+            Log::debug('Odoo login RPC returned empty result.', ['response' => $login]);
+        } catch (RuntimeException $exception) {
+            // Some Odoo versions deprecate the `login` RPC; fall back to `authenticate`.
+            Log::debug('Odoo login RPC threw exception, falling back to authenticate.', [
+                'message' => $exception->getMessage(),
+            ]);
+        }
+
+        $authenticate = $this->jsonRpc('common', 'authenticate', [
+            $database,
+            $username,
+            $secret,
+            [],
+        ]);
+
+        if (! empty($authenticate)) {
+            Log::debug('Odoo authenticate RPC succeeded.', ['user_id' => $authenticate]);
+            return (int) $authenticate;
+        }
+
+        Log::warning('Odoo authentication failed.', [
+            'login_response' => $login ?? null,
+            'authenticate_response' => $authenticate,
+        ]);
+
+        return null;
+    }
+
+    private function sanitizeRpcArgs(string $service, string $method, array $args): array
+    {
+        $sanitized = $args;
+
+        if ($service === 'common') {
+            if (isset($sanitized[2])) {
+                $sanitized[2] = '***';
+            }
+        }
+
+        if ($service === 'object' && isset($sanitized[2])) {
+            $sanitized[2] = '***';
+        }
+
+        return $sanitized;
     }
 
     private function getDatabase(): string
