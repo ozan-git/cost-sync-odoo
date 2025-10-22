@@ -13,6 +13,7 @@ class Product extends Model
         'name',
         'cost_price',
         'markup_percent',
+        'sale_price',
         'currency',
         'origin_system',
         'last_synced_at',
@@ -66,9 +67,15 @@ class Product extends Model
                     $product->markup_percent = 0;
                 }
             } else {
+                $markupDirty = $product->isDirty('markup_percent');
                 $product->markup_percent = round((float) ($product->markup_percent ?? 0), 2);
-                $markup = ($product->markup_percent ?? 0) / 100;
-                $product->sale_price = round(($product->cost_price ?? 0) * (1 + $markup), 2);
+
+                if ($product->isDirty('cost_price') || $markupDirty) {
+                    $markup = ($product->markup_percent ?? 0) / 100;
+                    $product->sale_price = round(($product->cost_price ?? 0) * (1 + $markup), 2);
+                } else {
+                    $product->sale_price = round((float) ($product->sale_price ?? 0), 2);
+                }
             }
 
             if (! $product->origin_system) {
@@ -83,7 +90,7 @@ class Product extends Model
         });
 
         static::saved(function (Product $product) {
-            if (static::$shouldDispatchOdooSync && $product->wasChanged(['cost_price', 'markup_percent', 'currency'])) {
+            if (static::$shouldDispatchOdooSync && $product->wasChanged(['cost_price', 'markup_percent', 'currency', 'sale_price'])) {
                 SyncProductCostToOdoo::dispatchSync($product->id);
             }
         });
